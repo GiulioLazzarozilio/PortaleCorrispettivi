@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework.renderers import JSONRenderer
 from rest_framework.permissions import IsAuthenticated
 from django.forms.models import model_to_dict
+from rest_framework import viewsets
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,17 @@ from .models import *
 # FUNZIONE LETTURA DATI DIARI LETTURE
 def load_diariletture(diari_letture, sheet_letture):
 	# CARICAMENTO DATI DIARI DELLE LETTURE
-	df = pd.concat([pd.read_excel(diario, sheet_letture, parse_dates=False) for diario in diari_letture])
+	liste_df = []
+	for diario in diari_letture:
+		try:
+			df_temp = pd.read_excel(diario, sheet_letture, parse_dates=False)
+			liste_df.append(df_temp)
+		except Exception as e:
+			print(f"Errore durante la lettura del file {diario}: {e}")
+	if not liste_df:
+		print("Nessun file caricato. Ritorno un DataFrame vuoto.")
+		return pd.DataFrame()
+	df = pd.concat(liste_df, ignore_index=True)
 	# RIMOZIONE COLONNE VUOTE
 	df = df.dropna(axis=1, how='all')
 	# FORMATTAZIONE DATAFRAME IN NUMERI
@@ -25,6 +36,7 @@ def load_diariletture(diari_letture, sheet_letture):
 	df.reset_index(drop=True, inplace=True)
 	df['mese'] = pd.to_datetime(df['mese'])
 	df.reset_index(drop=True, inplace=True)
+	print(df)
 	return df
 
 
@@ -212,13 +224,17 @@ def tabellacorrispettivi_data(anno_nickname):
 
 		# CONTROLLO FINALE SU INSERIMENTO FATTURE DEGLI ULTIMI DUE MESI
 		if anno == Now.year:
-			if df1[last_last_mese == df1['mese']].iloc[0]['fatturazione_tfo'] == 0:
-				index = df1[last_last_mese == df1['mese']].iloc[0]['i']
-				df1.loc[index, 'comments'] = 'fattura'
+			mask_last_last = (df1['mese'] == last_last_mese)
+			if not df1[mask_last_last].empty:
+				if df1[mask_last_last].iloc[0]['fatturazione_tfo'] == 0:
+					index = df1[mask_last_last].iloc[0]['i']
+					df1.loc[index, 'comments'] = 'fattura'
 
-			if df1[last_last_mese<df1['mese']].iloc[0]['fatturazione_tfo'] == 0:
-				index = df1[last_last_mese < df1['mese']].iloc[0]['i']
-				df1.loc[index, 'comments'] = 'fattura'
+			mask_after_last_last = (df1['mese'] > last_last_mese)
+			if not df1[mask_after_last_last].empty:
+				if df1[mask_after_last_last].iloc[0]['fatturazione_tfo'] == 0:
+					index = df1[mask_after_last_last].iloc[0]['i']
+					df1.loc[index, 'comments'] = 'fattura'
 
 			# SLICE DATI ANNO CORRENTE
 			df1 = df1[df1['mese'].dt.year == anno]
@@ -272,7 +288,21 @@ def tabellamisure_data(anno_nickname):
 
 	try:
 		df1 = load_diariletture(diari_letture, letture_sheet)
+		if df1.empty:
+			print("Nessun dato caricato da load_diariletture per Tabella Misure")
+			return {'anno': anno, 'TableMisure': [], 'info': dz_impianto}
+
 		df1['i'] = df1.index
+
+		# Verifica e inizializzazione delle colonne necessarie
+		required_columns = ['prodotta_campo', 'immessa_campo', 'prelevata_campo', 
+							'prodotta_ed', 'immessa_ed', 'prelevata_ed',
+							'prodotta_gse', 'immessa_gse', 'prelevata_gse', 'prodotta_def']
+		for col in required_columns:
+			if col not in df1.columns:
+				print(f"Avviso: la colonna '{col}' non è presente nel DataFrame. Inizializzo con 0.")
+				df1[col] = 0
+
 		# CALCOLO ENERGIA INCENTIVATA DAL CORRISPETTIVO
 		df1['E_incentivata'] = df1['aspettata_inc'] / 0.21
 
@@ -293,40 +323,36 @@ def tabellamisure_data(anno_nickname):
 		delta_imm_ed = delta_imm_ed.round(decimals=2)
 		delta_imm_gse = delta_imm_gse.round(decimals=2)
 
-		# SOSITTUZIONE VALORI "inf" e TRASFORMAZIONE IN STRRINGHE
+		# Sostituzione dei valori infiniti e conversione in stringa
 		delta_prod_ed = delta_prod_ed.replace([-np.inf, np.inf], '-').astype("string")
 		delta_prod_gse = delta_prod_gse.replace([-np.inf, np.inf], '-').astype("string")
 		delta_imm_ed = delta_imm_ed.replace([-np.inf, np.inf], '-').astype("string")
-		delta_imm_gse = delta_imm_gse.replace([-np.inf, np.inf, ], '-').astype("string")
+		delta_imm_gse = delta_imm_gse.replace([-np.inf, np.inf], '-').astype("string")
 
-		# DEFINIZIONE COLONNA CON DELTA PERCENTUALI CHE VENGONO SEPARATI E ELABORATI NEL FRONT-END
-		df1['check_misure'] = df1.check_misure.add(delta_prod_gse, fill_value='') + '_' + df1.check_misure.add(
-			delta_prod_ed, fill_value='') + '_' + df1.check_misure.add(delta_imm_gse,
-		                                                             fill_value='') + '_' + df1.check_misure.add(
-			delta_imm_ed, fill_value='')
+		# Composizione della colonna check_misure
+		df1['check_misure'] = (delta_prod_gse.astype(str) + '_' + 
+							   delta_prod_ed.astype(str) + '_' + 
+							   delta_imm_gse.astype(str) + '_' + 
+							   delta_imm_ed.astype(str))
 
-		# CHECK FINALE DI INSERIMENTO MISURE PER ULTIMI DUE MESI
+		# CHECK FINALE DI INSERIMENTO MISURE PER GLI ULTIMI DUE MESI
 		if anno == Now.year:
-			if df1[last_last_mese == df1['mese']].iloc[0]['prodotta_campo'] == 0 or df1[last_last_mese == df1['mese']].iloc[0]['prodotta_gse'] == 0:
-				index = df1[last_last_mese == df1['mese']].iloc[0]['i']
-				df1.loc[index, 'check_misure'] = 'misure'
-
-			if df1[last_last_mese < df1['mese']].iloc[0]['prodotta_campo'] == 0 or df1[last_last_mese < df1['mese']].iloc[0][
-				'prodotta_gse'] == 0:
-				index = df1[last_last_mese < df1['mese']].iloc[0]['i']
-				df1.loc[index, 'check_misure'] = 'misure'
-
+			if not df1[df1['mese'] == last_last_mese].empty:
+				if df1[df1['mese'] == last_last_mese].iloc[0]['prodotta_campo'] == 0 or df1[df1['mese'] == last_last_mese].iloc[0]['prodotta_gse'] == 0:
+					index = df1[df1['mese'] == last_last_mese].iloc[0]['i']
+					df1.loc[index, 'check_misure'] = 'misure'
+			if not df1[df1['mese'] > last_last_mese].empty:
+				if df1[df1['mese'] > last_last_mese].iloc[0]['prodotta_campo'] == 0 or df1[df1['mese'] > last_last_mese].iloc[0]['prodotta_gse'] == 0:
+					index = df1[df1['mese'] > last_last_mese].iloc[0]['i']
+					df1.loc[index, 'check_misure'] = 'misure'
 			# SLICE SU DATI ANNO CORRENTE
 			df1 = df1[df1['mese'].dt.year == anno]
 
-		# CODICE DI GESTIONE DEI COMMENTI SULLE MISURE
-		# comments = impianto.Commento.objects.filter(impianto=nickname)
+		# GESTIONE DEI COMMENTI
 		comments = impianto.commento_set.all()
 		comments = list(comments.values())
 		comments = [comment for comment in comments if comment['mese_misura'].year == anno]
-
 		df1['comments'] = ''
-
 		for comment in comments:
 			df1.loc[df1.index[comment['mese_misura'].month - 1], 'comments'] = comment['testo'] + '&' + comment['stato']
 
@@ -334,9 +360,9 @@ def tabellamisure_data(anno_nickname):
 		df1.replace(0, np.nan, inplace=True)
 		df1 = df1.fillna('')
 
-		dict2 = df1[
-			['i', 'mese', 'prodotta_campo', 'immessa_campo', 'prelevata_campo', 'prodotta_ed', 'immessa_ed', 'prelevata_ed',
-			 'prodotta_gse', 'immessa_gse', 'check_misure', 'comments', 'prodotta_def']].to_dict('records')
+		dict2 = df1[['i', 'mese', 'prodotta_campo', 'immessa_campo', 'prelevata_campo', 
+					 'prodotta_ed', 'immessa_ed', 'prelevata_ed', 'prodotta_gse', 'immessa_gse', 
+					 'check_misure', 'comments', 'prodotta_def']].to_dict('records')
 
 	except Exception as error:
 		print(f'Errore elaborazione Tabella Misure', type(error).__name__, "–", error)
@@ -351,20 +377,27 @@ def tabellamisure_data(anno_nickname):
 
 
 def energievolumi_dati(nickname):
-	# ESTRAPOLO DATI IMPIANTO DAL DATABASE
 	impianto = Impianto.objects.all().filter(nickname=nickname)[0]
 	dz_impianto = model_to_dict(impianto)
 
 	dati_mensili = str(impianto.datimensili_set.all()[0])
-	df_dati_mensili = pd.read_excel(dati_mensili, 'Foglio1', parse_dates=False)
+	
+	# Se il file esiste, lo processo, altrimenti creo un DataFrame vuoto o gestisco il caso opportunamente
+	try:
+		df_dati_mensili = pd.read_excel(dati_mensili, 'Foglio1', parse_dates=False)
+	except Exception as e:
+		print(f"Errore durante la lettura del file dati mensili: {e}")
+		df_dati_mensili = pd.DataFrame()
 
-	if nickname == 'ionico_foresta':
+	# Se si tratta del 2025 (o comunque se desideri un comportamento diverso per il 2025):
+	if nickname == 'ionico_foresta' and '2025' in dati_mensili:
+		# Applica eventuali logiche specifiche per 2025, ad es. scarta le righe mancanti
 		df_dati_mensili = df_dati_mensili.loc[:df_dati_mensili.MESE.isnull().idxmax() - 1, ['MESE', 'Prodotta', 'Portata DN800', 'Volume derivato']]
 		df_dati_mensili = df_dati_mensili.rename(columns={'MESE': 'mesi', 'Portata DN800': 'Portata media'})
 		df_dati_mensili = df_dati_mensili.iloc[-24:].reset_index(drop=True).copy()
 		df_dati_mensili = df_dati_mensili.fillna('')
-
 	else:
+		# Logica standard
 		df_dati_mensili = df_dati_mensili.rename(columns={df_dati_mensili.columns[0]: 'mesi'})
 		df_dati_mensili = df_dati_mensili[['mesi', 'Portata media', 'Volume derivato', 'Prodotta']].copy()
 		df_dati_mensili = df_dati_mensili.dropna(how='all')
@@ -418,3 +451,14 @@ class DatiReportImpianto(APIView):
 	def get(self, request, nickname, format=None):
 		data = energievolumi_dati(nickname)
 		return Response(data)
+
+
+class CorrispettiviViewSet(viewsets.ModelViewSet):
+	def get_queryset(self):
+		queryset = Corrispettivi.objects.all()
+		anno = self.request.query_params.get('anno', None)
+		
+		if anno in ['2023', '2024', '2025']:  # Aggiunto 2025
+			queryset = queryset.filter(anno=anno)
+			
+		return queryset
